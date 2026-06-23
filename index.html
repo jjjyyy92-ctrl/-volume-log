@@ -157,6 +157,8 @@
   .btn.primary{background:var(--accent);color:var(--accent-ink)} .btn.primary:active{background:var(--accent-press)}
   .btn.ghost{flex:0 0 auto;background:var(--surface2);color:var(--muted);border:1px solid var(--line);padding:15px 18px}
   .btn.ghost:hover{color:var(--warn);border-color:var(--warn)}
+  .btn.alt{flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--line)}
+  .btn.alt:hover{border-color:var(--faint)}
 
   /* manage */
   .field{margin-bottom:14px}
@@ -221,7 +223,7 @@
         {id:'e8',part:'전신',name:'케틀벨스윙',reps:10,sets:10,weight:16},
         {id:'e9',part:'하체',name:'한발스쿼트',reps:12,sets:3,weight:0},
         {id:'e10',part:'하체',name:'런지',reps:12,sets:3,weight:0}]}],
-    logs:{}};}
+    logs:{},sync:{url:'',secret:''},updatedAt:0};}
 
   let state=seed();
   let view='log';            // 'log' | 'records'
@@ -235,10 +237,30 @@
   async function load(){
     if(window.storage){try{const r=await window.storage.get(KEY);if(r)return JSON.parse(r.value);}catch(e){}}
     try{const v=localStorage.getItem(KEY);return v?JSON.parse(v):null;}catch(e){return null;}}
-  let saveT=null;
-  function save(){clearTimeout(saveT);saveT=setTimeout(async()=>{const s=JSON.stringify(state);
+  async function persist(){const s=JSON.stringify(state);
     if(window.storage){try{await window.storage.set(KEY,s);return;}catch(e){}}
-    try{localStorage.setItem(KEY,s);}catch(e){}},250);}
+    try{localStorage.setItem(KEY,s);}catch(e){}}
+  let saveT=null;
+  function save(){state.updatedAt=Date.now();clearTimeout(saveT);
+    saveT=setTimeout(()=>{persist();cloudPush();},250);}
+  function cloudData(){const p={...state};delete p.sync;return JSON.stringify(p);}
+  function syncStatus(m){const el=document.getElementById('syncmsg');if(el)el.textContent=m;toast(m);}
+  async function cloudPush(){const sy=state.sync||{};if(!sy.url)return;
+    try{const r=await fetch(sy.url,{method:'POST',body:JSON.stringify({secret:sy.secret||'',data:cloudData()})});
+      const j=await r.json();syncStatus(j&&j.ok?'시트에 올림 ✓':'올리기 실패: '+((j&&j.error)||'?'));}
+    catch(e){syncStatus('올리기 실패 (URL/네트워크 확인)');}}
+  async function cloudPull(){const sy=state.sync||{};if(!sy.url)return;
+    try{const r=await fetch(sy.url+'?secret='+encodeURIComponent(sy.secret||''));
+      const j=await r.json();
+      if(!j||!j.ok){syncStatus('가져오기 실패: '+((j&&j.error)||'?'));return;}
+      if(!j.data){syncStatus('시트에 저장된 기록이 아직 없어요');return;}
+      const remote=JSON.parse(j.data);
+      if((remote.updatedAt||0)>(state.updatedAt||0)){
+        const sync=state.sync;state={...seed(),...remote,sync};
+        if(!dayList().some(d=>d.iso===sel))sel=todayISO();
+        persist();render();syncStatus('시트에서 가져옴 ✓');
+      }else{syncStatus('이미 최신 상태예요');}
+    }catch(e){syncStatus('가져오기 실패 (URL/네트워크 확인)');}}
 
   // helpers
   const pad=n=>String(n).padStart(2,'0');
@@ -432,6 +454,11 @@
       b+=`<button class="addex" data-add="${g.id}">+ 운동 종목 추가</button></div>`;
     });
     b+=`<button class="addgrp" data-addgrp="1">+ 그룹 추가</button>
+      <div class="mgrp">동기화 (구글 시트)</div>
+      <div class="field"><label>Apps Script 웹앱 URL</label><input class="num" id="m-syncurl" value="${esc((state.sync||{}).url||'')}" placeholder="https://script.google.com/macros/s/.../exec"></div>
+      <div class="field"><label>비밀코드 (선택)</label><input class="num" id="m-syncsec" value="${esc((state.sync||{}).secret||'')}" placeholder="스크립트의 SECRET과 동일하게"></div>
+      <div class="sh-actions" style="margin-bottom:6px"><button class="btn alt" data-act="pull">⬇ 가져오기</button><button class="btn alt" data-act="push">⬆ 올리기</button></div>
+      <div id="syncmsg" class="hint" style="margin:2px 2px 14px"></div>
       <div class="sh-actions" style="margin-top:8px"><button class="btn primary" data-act="savemanage">저장</button></div>
       <div style="margin-top:6px"><button class="btn ghost" data-act="reset" style="width:100%;flex:1">모든 기록 초기화</button></div>`;
     showSheet(b);
@@ -453,12 +480,16 @@
       state.groups.forEach(g=>{g.exercises=g.exercises.filter(e=>e.name.trim());});
       state.groups=state.groups.filter(g=>g.exercises.length||state.groups.length===1);
       save();closeSheet();const days=dayList();if(!days.some(d=>d.iso===sel))sel=state.startDate;render();toast('저장됐어요');};
+    const pushB=sh.querySelector('[data-act="push"]');if(pushB)pushB.onclick=()=>{readManage(sh);persist();cloudPush();};
+    const pullB=sh.querySelector('[data-act="pull"]');if(pullB)pullB.onclick=()=>{readManage(sh);persist();cloudPull();};
     sh.querySelector('[data-act="reset"]').onclick=()=>{if(confirm('입력한 모든 운동 기록을 지웁니다. 계속할까요?')){
       state.logs={};save();closeSheet();render();toast('초기화 완료');}};
   }
   function readManage(sh){
     const st=sh.querySelector('#m-start');if(st&&st.value)state.startDate=st.value;
     const dd=sh.querySelector('#m-days');if(dd){let v=parseInt(dd.value)||14;state.numDays=Math.min(60,Math.max(1,v));}
+    const su=sh.querySelector('#m-syncurl'),sk=sh.querySelector('#m-syncsec');
+    if(su)state.sync={url:su.value.trim(),secret:sk?sk.value.trim():''};
     sh.querySelectorAll('.mg-grp').forEach(gel=>{const g=state.groups.find(x=>x.id===gel.dataset.grp);if(!g)return;
       const gn=gel.querySelector('.gname');if(gn)g.name=gn.value.trim()||'그룹';
       const u=gel.querySelector('.unitsel button.on');if(u)g.unit=u.dataset.u;
@@ -519,7 +550,8 @@
   // ---------- init ----------
   app.innerHTML='<div class="loading">불러오는 중…</div>';
   (async()=>{const saved=await load();if(saved&&saved.groups)state={...seed(),...saved};
-    const days=dayList(),t=todayISO();sel=days.some(d=>d.iso===t)?t:state.startDate;render();})();
+    const days=dayList(),t=todayISO();sel=days.some(d=>d.iso===t)?t:state.startDate;render();
+    if(state.sync&&state.sync.url)cloudPull();})();
 })();
 </script>
 
